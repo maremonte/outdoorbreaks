@@ -1,2 +1,5 @@
 *.csv
+*.png
+*.pptx
 *.Rmd
+map_files*
