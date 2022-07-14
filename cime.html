@@ -1160,9 +1160,10 @@ var markInterval = function(d, digits, interval, mark, decMark, precision) {
   return xv.join(decMark);
 };
 
-DTWidget.formatCurrency = function(data, currency, digits, interval, mark, decMark, before) {
+DTWidget.formatCurrency = function(data, currency, digits, interval, mark, decMark, before, zeroPrint) {
   var d = parseFloat(data);
   if (isNaN(d)) return '';
+  if (zeroPrint !== null && d === 0.0) return zeroPrint;
   var res = markInterval(d, digits, interval, mark, decMark);
   res = before ? (/^-/.test(res) ? '-' + currency + res.replace(/^-/, '') : currency + res) :
     res + currency;
@@ -1175,21 +1176,24 @@ DTWidget.formatString = function(data, prefix, suffix) {
   return prefix + d + suffix;
 };
 
-DTWidget.formatPercentage = function(data, digits, interval, mark, decMark) {
+DTWidget.formatPercentage = function(data, digits, interval, mark, decMark, zeroPrint) {
   var d = parseFloat(data);
   if (isNaN(d)) return '';
+  if (zeroPrint !== null && d === 0.0) return zeroPrint;
   return markInterval(d * 100, digits, interval, mark, decMark) + '%';
 };
 
-DTWidget.formatRound = function(data, digits, interval, mark, decMark) {
+DTWidget.formatRound = function(data, digits, interval, mark, decMark, zeroPrint) {
   var d = parseFloat(data);
   if (isNaN(d)) return '';
+  if (zeroPrint !== null && d === 0.0) return zeroPrint;
   return markInterval(d, digits, interval, mark, decMark);
 };
 
-DTWidget.formatSignif = function(data, digits, interval, mark, decMark) {
+DTWidget.formatSignif = function(data, digits, interval, mark, decMark, zeroPrint) {
   var d = parseFloat(data);
   if (isNaN(d)) return '';
+  if (zeroPrint !== null && d === 0.0) return zeroPrint;
   return markInterval(d, digits, interval, mark, decMark, true);
 };
 
@@ -1209,6 +1213,67 @@ DTWidget.formatDate = function(data, method, params) {
 };
 
 window.DTWidget = DTWidget;
+
+// A helper function to update the properties of existing filters
+var setFilterProps = function(td, props) {
+  // Update enabled/disabled state
+  var $input = $(td).find('input').first();
+  var searchable = $input.data('searchable');
+  $input.prop('disabled', !searchable || props.disabled);
+
+  // Based on the filter type, set its new values
+  var type = td.getAttribute('data-type');
+  if (['factor', 'logical'].includes(type)) {
+    // Reformat the new dropdown options for use with selectize
+    var new_vals = props.params.options.map(function(item) {
+      return { text: item, value: item };
+    });
+
+    // Find the selectize object
+    var dropdown = $(td).find('.selectized').eq(0)[0].selectize;
+
+    // Note the current values
+    var old_vals = dropdown.getValue();
+
+    // Remove the existing values
+    dropdown.clearOptions();
+
+    // Add the new options
+    dropdown.addOption(new_vals);
+
+    // Preserve the existing values
+    dropdown.setValue(old_vals);
+
+  } else if (['number', 'integer', 'date', 'time'].includes(type)) {
+    // Apply internal scaling to new limits. Updating scale not yet implemented.
+    var slider = $(td).find('.noUi-target').eq(0);
+    var scale = Math.pow(10, Math.max(0, +slider.data('scale') || 0));
+    var new_vals = [props.params.min * scale, props.params.max * scale];
+
+    // Note what the new limits will be just for this filter
+    var new_lims = new_vals.slice();
+
+    // Determine the current values and limits
+    var old_vals = slider.val().map(Number);
+    var old_lims = slider.noUiSlider('options').range;
+    old_lims = [old_lims.min, old_lims.max];
+
+    // Preserve the current values if filters have been applied; otherwise, apply no filtering
+    if (old_vals[0] != old_lims[0]) {
+      new_vals[0] = Math.max(old_vals[0], new_vals[0]);
+    }
+
+    if (old_vals[1] != old_lims[1]) {
+      new_vals[1] = Math.min(old_vals[1], new_vals[1]);
+    }
+
+    // Update the endpoints of the slider
+    slider.noUiSlider({
+      start: new_vals,
+      range: {'min': new_lims[0], 'max': new_lims[1]}
+    }, true);
+  }
+};
 
 var transposeArray2D = function(a) {
   return a.length === 0 ? a : HTMLWidgets.transposeArray2D(a);
@@ -1241,6 +1306,12 @@ HTMLWidgets.widget({
   type: "output",
   renderOnNullValue: true,
   initialize: function(el, width, height) {
+    // in order that the type=number inputs return a number
+    $.valHooks.number = {
+      get: function(el) {
+        return el.value * 1;
+      }
+    };
     $(el).html('&nbsp;');
     return {
       data: null,
@@ -1496,13 +1567,6 @@ HTMLWidgets.widget({
       return $.inArray(val, $.makeArray(array)) > -1;
     };
 
-    // encode + to %2B when searching in the table on server side, because
-    // shiny::parseQueryString() treats + as spaces, and DataTables does not
-    // encode + to %2B (or % to %25) when sending the request
-    var encode_plus = function(x) {
-      return server ? x.replace(/%/g, '%25').replace(/\+/g, '%2B') : x;
-    };
-
     // search the i-th column
     var searchColumn = function(i, value) {
       var regex = false, ci = true;
@@ -1510,7 +1574,7 @@ HTMLWidgets.widget({
         regex = options.search.regex,
         ci = options.search.caseInsensitive !== false;
       }
-      return table.column(i).search(encode_plus(value), regex, !regex, ci);
+      return table.column(i).search(value, regex, !regex, ci);
     };
 
     if (data.filter !== 'none') {
@@ -1519,7 +1583,10 @@ HTMLWidgets.widget({
 
         var $td = $(td), type = $td.data('type'), filter;
         var $input = $td.children('div').first().children('input');
-        $input.prop('disabled', !table.settings()[0].aoColumns[i].bSearchable || type === 'disabled');
+        var disabled = $input.prop('disabled');
+        var searchable = table.settings()[0].aoColumns[i].bSearchable;
+        $input.prop('disabled', !searchable || disabled);
+        $input.data('searchable', searchable); // for updating later
         $input.on('input blur', function() {
           $input.next('span').toggle(Boolean($input.val()));
         });
@@ -1584,7 +1651,7 @@ HTMLWidgets.widget({
               if (value.length) $input.trigger('input');
               $input.attr('title', $input.val());
               if (server) {
-                table.column(i).search(value.length ? encode_plus(JSON.stringify(value)) : '').draw();
+                table.column(i).search(value.length ? JSON.stringify(value) : '').draw();
                 return;
               }
               // turn off filter if nothing selected
@@ -2505,6 +2572,23 @@ HTMLWidgets.widget({
       table.ajax.reload(null, resetPaging);
     }
 
+    // update table filters (set new limits of sliders)
+    methods.updateFilters = function(newProps) {
+      // loop through each filter in the filter row
+      filterRow.each(function(i, td) {
+        var k = i;
+        if (filterRow.length > newProps.length) {
+          if (i === 0) return;  // first column is row names
+          k = i - 1;
+        }
+        // Update the filters to reflect the updated data.
+        // Allow "falsy" (e.g. NULL) to signify a no-op.
+        if (newProps[k]) {
+          setFilterProps(td, newProps[k]);
+        }
+      });
+    };
+
     table.shinyMethods = methods;
   },
   resize: function(el, width, height, instance) {
@@ -2528,6 +2612,12 @@ HTMLWidgets.widget({
     var framingHeight = dtWrapper.innerHeight() - dtScrollBody.innerHeight();
     var scrollBodyHeight = availableHeight - framingHeight;
 
+    // we need to set `max-height` to none as datatables library now sets this
+    // to a fixed height, disabling the ability to resize to fill the window,
+    // as it will be set to a fixed 100px under such circumstances, e.g., RStudio IDE,
+    // or FlexDashboard
+    // see https://github.com/rstudio/DT/issues/951#issuecomment-1026464509
+    dtScrollBody.css('max-height', 'none');
     // set the height
     dtScrollBody.height(scrollBodyHeight + 'px');
   },
@@ -3195,6 +3285,7 @@ if (window.hljs) {
 
 
 
+
 <style type="text/css">
 .main-container {
   max-width: 940px;
@@ -3215,6 +3306,9 @@ button.code-folding-btn:focus {
 }
 summary {
   display: list-item;
+}
+details > summary > p:only-child {
+  display: inline;
 }
 pre code {
   padding: 0;
@@ -3302,8 +3396,8 @@ pre code {
 </div>
 
 
-<div id="htmlwidget-b59127aa038d19c2a870" style="width:100%;height:auto;" class="datatables html-widget"></div>
-<script type="application/json" data-for="htmlwidget-b59127aa038d19c2a870">{"x":{"filter":"top","vertical":false,"filterHTML":"<tr>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"integer\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n    <div style=\"display: none;position: absolute;width: 200px;opacity: 1\">\n      <div data-min=\"909\" data-max=\"4248\"><\/div>\n      <span style=\"float: left;\"><\/span>\n      <span style=\"float: right;\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n<\/tr>","data":[["Mont Blanc du Tacul","Lyfispitze - Punta Livi","Schluderspitze - Punta Sluder","Cornetto di Folgaria","Monte Maggio","Cima Capi","Cima Rocca","Corno di Pichea","Gavardina","Monte Tofino","Monte Brugnol","Cima Caldenave","Croz di Primalunetta","Fravort","Monte Cauriol","Monte Cenon","Monte Gronlait","Monte Ruioch","Schvorzlommer","Tombolin di Caldenave","Paganella","Cima di Lusia","Monte Castelberto","Monte Calisio","Palon","Piz Boè","Monte Vioz","Tre Venezie","Cima Scarpacò"],[4248,3352,3230,2060,1852,909,1090,2138,2047,2151,2221,2442,2304,2347,2494,2278,2883,2414,2391,2319,2125,2492,1765,1096,2098,3152,3645,3386,3252],["<a href='https://outdoorbreaks.blogspot.com/search/label/Aosta' target='_blank'>Courmayeur<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Martello' target='_blank'>Val Martello<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Martello' target='_blank'>Val Martello<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Alpe Cimbra' target='_blank'>Alpe Cimbra<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Alpe Cimbra' target='_blank'>Alpe Cimbra<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Giudicarie' target='_blank'>Giudicarie<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Paganella' target='_blank'>Paganella<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Pale di San Martino' target='_blank'>Pale di San Martino<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Pasubio' target='_blank'>Pasubio<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Trento' target='_blank'>Trento<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Trento' target='_blank'>Trento<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val di Fassa' target='_blank'>Val di Fassa<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val di Peio' target='_blank'>Val di Peio<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val di Peio' target='_blank'>Val di Peio<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Nambrone' target='_blank'>Val Nambrone<\/a>"],["Aosta","Alto Adige","Alto Adige","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino"],["<a href='https://outdoorbreaks.blogspot.com/2021/09/tacul.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/08/lyfispitze.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/schluderspitze.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/03/cornetto-folgaria.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/05/maggio.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/09/capi-rocca.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/09/capi-rocca.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/concei.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/concei.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/concei.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/07/brugnol.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/fravort-gronlait.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/10/cauriol.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/fravort-gronlait.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/09/ruioch.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/09/ruioch.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/02/la-paganella.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/02/lusia.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/09/castelberto.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/05/calisio.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/02/palon.html' target='_blank'>link-1<\/a>\n<a href='https://outdoorbreaks.blogspot.com/2019/02/palon-mezzavia.html' target='_blank'>link-2<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/08/boe.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2017/07/vioz.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2022/07/tre-venezie.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/08/scarpaco.html' target='_blank'>link-1<\/a>"]],"container":"<table class=\"display\">\n  <thead>\n    <tr>\n      <th>Cim<\/th>\n      <th>Altitud (m.)<\/th>\n      <th>Localitat<\/th>\n      <th>Provincia<\/th>\n      <th>Enllaç<\/th>\n    <\/tr>\n  <\/thead>\n<\/table>","options":{"pageLength":29,"dom":"t","columnDefs":[{"className":"dt-right","targets":1}],"order":[],"autoWidth":false,"orderClasses":false,"orderCellsTop":true,"lengthMenu":[10,25,29,50,100]}},"evals":[],"jsHooks":[]}</script>
+<div id="htmlwidget-9d2258391b2b03f76bd1" style="width:100%;height:auto;" class="datatables html-widget"></div>
+<script type="application/json" data-for="htmlwidget-9d2258391b2b03f76bd1">{"x":{"filter":"top","vertical":false,"filterHTML":"<tr>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"integer\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n    <div style=\"display: none;position: absolute;width: 200px;opacity: 1\">\n      <div data-min=\"909\" data-max=\"4248\"><\/div>\n      <span style=\"float: left;\"><\/span>\n      <span style=\"float: right;\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n  <td data-type=\"character\" style=\"vertical-align: top;\">\n    <div class=\"form-group has-feedback\" style=\"margin-bottom: auto;\">\n      <input type=\"search\" placeholder=\"All\" class=\"form-control\" style=\"width: 100%;\"/>\n      <span class=\"glyphicon glyphicon-remove-circle form-control-feedback\"><\/span>\n    <\/div>\n  <\/td>\n<\/tr>","data":[["Mont Blanc du Tacul","Lyfispitze - Punta Livi","Schluderspitze - Punta Sluder","Monte delle Pecore","Cornetto di Folgaria","Monte Maggio","Cima Capi","Cima Rocca","Corno di Pichea","Gavardina","Monte Tofino","Monte Brugnol","Cima Caldenave","Croz di Primalunetta","Fravort","Monte Cauriol","Monte Cenon","Monte Gronlait","Monte Ruioch","Schvorzlommer","Tombolin di Caldenave","Paganella","Cima di Lusia","Monte Castelberto","Monte Calisio","Palon","Piz Boè","Monte Vioz","Tre Venezie","Cima Scarpacò"],[4248,3352,3230,3099,2060,1852,909,1090,2138,2047,2151,2221,2442,2304,2347,2494,2278,2883,2414,2391,2319,2125,2492,1765,1096,2098,3152,3645,3386,3252],["<a href='https://outdoorbreaks.blogspot.com/search/label/Aosta' target='_blank'>Courmayeur<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Martello' target='_blank'>Val Martello<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Martello' target='_blank'>Val Martello<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Senales' target='_blank'>Val Senales<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Alpe Cimbra' target='_blank'>Alpe Cimbra<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Alpe Cimbra' target='_blank'>Alpe Cimbra<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Garda' target='_blank'>Ledro<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Giudicarie' target='_blank'>Giudicarie<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Lagorai' target='_blank'>Lagorai<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Paganella' target='_blank'>Paganella<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Pale di San Martino' target='_blank'>Pale di San Martino<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Pasubio' target='_blank'>Pasubio<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Trento' target='_blank'>Trento<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Trento' target='_blank'>Trento<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val di Fassa' target='_blank'>Val di Fassa<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val di Peio' target='_blank'>Val di Peio<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val di Peio' target='_blank'>Val di Peio<\/a>","<a href='https://outdoorbreaks.blogspot.com/search/label/Val Nambrone' target='_blank'>Val Nambrone<\/a>"],["Aosta","Alto Adige","Alto Adige","Alto Adige","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino","Trentino"],["<a href='https://outdoorbreaks.blogspot.com/2021/09/tacul.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/08/lyfispitze.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/schluderspitze.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2022/07/monte-delle-pecore.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/03/cornetto-folgaria.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/05/maggio.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/09/capi-rocca.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/09/capi-rocca.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/concei.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/concei.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/concei.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/07/brugnol.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/fravort-gronlait.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/10/cauriol.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/06/fravort-gronlait.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/09/ruioch.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/09/ruioch.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/08/caldenave-primalunetta-cenon.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/02/la-paganella.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/02/lusia.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2021/09/castelberto.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2020/05/calisio.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2018/02/palon.html' target='_blank'>link-1<\/a>\n<a href='https://outdoorbreaks.blogspot.com/2019/02/palon-mezzavia.html' target='_blank'>link-2<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/08/boe.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2017/07/vioz.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2022/07/tre-venezie.html' target='_blank'>link-1<\/a>","<a href='https://outdoorbreaks.blogspot.com/2019/08/scarpaco.html' target='_blank'>link-1<\/a>"]],"container":"<table class=\"display\">\n  <thead>\n    <tr>\n      <th>Cim<\/th>\n      <th>Altitud (m.)<\/th>\n      <th>Localitat<\/th>\n      <th>Provincia<\/th>\n      <th>Enllaç<\/th>\n    <\/tr>\n  <\/thead>\n<\/table>","options":{"pageLength":30,"dom":"t","columnDefs":[{"className":"dt-right","targets":1}],"order":[],"autoWidth":false,"orderClasses":false,"orderCellsTop":true,"lengthMenu":[10,25,30,50,100]}},"evals":[],"jsHooks":[]}</script>
 
 
 
